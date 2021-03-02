@@ -9,16 +9,17 @@ import (
 	applicationClient "github.com/argoproj/argo-cd/pkg/apiclient/application"
 	application "github.com/argoproj/argo-cd/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/gitops-engine/pkg/health"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
 func resourceArgoCDApplication() *schema.Resource {
 	return &schema.Resource{
-		Create: resourceArgoCDApplicationCreate,
-		Read:   resourceArgoCDApplicationRead,
-		Update: resourceArgoCDApplicationUpdate,
-		Delete: resourceArgoCDApplicationDelete,
+		CreateContext: resourceArgoCDApplicationCreate,
+		ReadContext:   resourceArgoCDApplicationRead,
+		Update:        resourceArgoCDApplicationUpdate,
+		Delete:        resourceArgoCDApplicationDelete,
 		// TODO: add importer acceptance tests
 		Importer: &schema.ResourceImporter{
 			StateContext: schema.ImportStatePassthroughContext,
@@ -41,21 +42,25 @@ func resourceArgoCDApplication() *schema.Resource {
 	}
 }
 
-func resourceArgoCDApplicationCreate(d *schema.ResourceData, meta interface{}) error {
-	objectMeta, spec, err := expandApplication(d)
-	if err != nil {
-		return err
+func resourceArgoCDApplicationCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	objectMeta, spec, diags := expandApplication(d)
+	if diags != nil {
+		return diags
 	}
 	server := meta.(ServerInterface)
 	c := *server.ApplicationClient
-	app, err := c.Get(context.Background(), &applicationClient.ApplicationQuery{
+	app, err := c.Get(ctx, &applicationClient.ApplicationQuery{
 		Name: &objectMeta.Name,
 	})
 	if err != nil {
-		switch strings.Contains(err.Error(), "NotFound") {
-		case true:
-		default:
-			return err
+		if strings.Contains(err.Error(), "NotFound") {
+			return []diag.Diagnostic{
+				diag.Diagnostic{
+					Severity: diag.Error,
+					Summary:  fmt.Sprintf("Application %s not found", objectMeta.Name),
+					Detail:   err.Error(),
+				},
+			}
 		}
 	}
 	if app != nil {
@@ -69,14 +74,26 @@ func resourceArgoCDApplicationCreate(d *schema.ResourceData, meta interface{}) e
 
 	featureApplicationLevelSyncOptionsSupported, err := server.isFeatureSupported(featureApplicationLevelSyncOptions)
 	if err != nil {
-		return err
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  "Feature not supported",
+				Detail:   err.Error(),
+			},
+		}
 	}
 	if !featureApplicationLevelSyncOptionsSupported &&
 		spec.SyncPolicy != nil &&
 		spec.SyncPolicy.SyncOptions != nil {
-		return fmt.Errorf(
-			"application-level sync_options is only supported from ArgoCD %s onwards",
-			featureVersionConstraintsMap[featureApplicationLevelSyncOptions].String())
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary: fmt.Sprintf(
+					"application-level sync_options is only supported from ArgoCD %s onwards",
+					featureVersionConstraintsMap[featureApplicationLevelSyncOptions].String()),
+				Detail: err.Error(),
+			},
+		}
 	}
 
 	app, err = c.Create(context.Background(), &applicationClient.ApplicationCreateRequest{
@@ -86,10 +103,21 @@ func resourceArgoCDApplicationCreate(d *schema.ResourceData, meta interface{}) e
 		},
 	})
 	if err != nil {
-		return err
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Application %s could not be created", objectMeta.Name),
+				Detail:   err.Error(),
+			},
+		}
 	}
 	if app == nil {
-		return fmt.Errorf("something went wrong during application creation")
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Application %s could not be created: unknown reason", objectMeta.Name),
+			},
+		}
 	}
 	d.SetId(app.Name)
 	if wait, ok := d.GetOk("wait"); ok && wait.(bool) {
@@ -112,13 +140,19 @@ func resourceArgoCDApplicationCreate(d *schema.ResourceData, meta interface{}) e
 			return nil
 		})
 		if err != nil {
-			return fmt.Errorf("something went wrong upon waiting for the application to be created: %s", err)
+			return []diag.Diagnostic{
+				diag.Diagnostic{
+					Severity: diag.Error,
+					Summary:  fmt.Sprintf("Error while waiting for application %s to be created", objectMeta.Name),
+					Detail:   err.Error(),
+				},
+			}
 		}
 	}
-	return resourceArgoCDApplicationRead(d, meta)
+	return resourceArgoCDApplicationRead(ctx, d, meta)
 }
 
-func resourceArgoCDApplicationRead(d *schema.ResourceData, meta interface{}) error {
+func resourceArgoCDApplicationRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	server := meta.(ServerInterface)
 	c := *server.ApplicationClient
 	appName := d.Id()
@@ -126,16 +160,20 @@ func resourceArgoCDApplicationRead(d *schema.ResourceData, meta interface{}) err
 		Name: &appName,
 	})
 	if err != nil {
-		switch strings.Contains(err.Error(), "NotFound") {
-		case true:
+		if strings.Contains(err.Error(), "NotFound") {
 			d.SetId("")
-			return nil
-		default:
-			return err
+			return diag.Diagnostics{}
+		}
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Application %s not found", appName),
+				Detail:   err.Error(),
+			},
 		}
 	}
-	err = flattenApplication(app, d)
-	return err
+	diags = flattenApplication(app, d)
+	return diags
 }
 
 func resourceArgoCDApplicationUpdate(d *schema.ResourceData, meta interface{}) error {
