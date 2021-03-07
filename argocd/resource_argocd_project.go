@@ -9,15 +9,16 @@ import (
 
 	projectClient "github.com/argoproj/argo-cd/pkg/apiclient/project"
 	application "github.com/argoproj/argo-cd/pkg/apis/application/v1alpha1"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
 func resourceArgoCDProject() *schema.Resource {
 	return &schema.Resource{
-		Create: resourceArgoCDProjectCreate,
-		Read:   resourceArgoCDProjectRead,
-		Update: resourceArgoCDProjectUpdate,
-		Delete: resourceArgoCDProjectDelete,
+		CreateContext: resourceArgoCDProjectCreate,
+		ReadContext:   resourceArgoCDProjectRead,
+		UpdateContext: resourceArgoCDProjectUpdate,
+		DeleteContext: resourceArgoCDProjectDelete,
 		// TODO: add importer acceptance tests
 		Importer: &schema.ResourceImporter{
 			StateContext: schema.ImportStatePassthroughContext,
@@ -42,10 +43,10 @@ func resourceArgoCDProject() *schema.Resource {
 	}
 }
 
-func resourceArgoCDProjectCreate(d *schema.ResourceData, meta interface{}) error {
+func resourceArgoCDProjectCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	objectMeta, spec, err := expandProject(d)
-	if err != nil {
-		return err
+	if diags != nil {
+		return diags
 	}
 	server := meta.(ServerInterface)
 	c := *server.ProjectClient
@@ -61,10 +62,13 @@ func resourceArgoCDProjectCreate(d *schema.ResourceData, meta interface{}) error
 	tokenMutexProjectMap[projectName].RUnlock()
 
 	if err != nil {
-		switch strings.Contains(err.Error(), "NotFound") {
-		case true:
-		default:
-			return err
+		if strings.Contains(err.Error(), "NotFound") {
+			return []diag.Diagnostic{
+				diag.Diagnostic{
+					Severity: diag.Error,
+					Summary:  fmt.Sprintf("Project %s could not be created", projectName),
+					Detail:   err.Error(),
+				},
 		}
 	}
 	if p != nil {
@@ -89,16 +93,27 @@ func resourceArgoCDProjectCreate(d *schema.ResourceData, meta interface{}) error
 	tokenMutexProjectMap[projectName].Unlock()
 
 	if err != nil {
-		return err
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Project %s could not be created", objectMeta.Name),
+				Detail:   err.Error(),
+			},
 	}
 	if p == nil {
-		return fmt.Errorf("something went wrong during project creation")
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Errorf("something went wrong during project creation"),
+				Detail:   err.Error(),
+			},
+		}
 	}
 	d.SetId(p.Name)
-	return resourceArgoCDProjectRead(d, meta)
+	return resourceArgoCDProjectRead(ctx, d, meta)
 }
 
-func resourceArgoCDProjectRead(d *schema.ResourceData, meta interface{}) error {
+func resourceArgoCDProjectRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	server := meta.(ServerInterface)
 	c := *server.ProjectClient
 	projectName := d.Id()
@@ -113,23 +128,26 @@ func resourceArgoCDProjectRead(d *schema.ResourceData, meta interface{}) error {
 	tokenMutexProjectMap[projectName].RUnlock()
 
 	if err != nil {
-		switch strings.Contains(err.Error(), "NotFound") {
-		case true:
+		if strings.Contains(err.Error(), "NotFound") {
 			d.SetId("")
-			return nil
-		default:
-			return err
+			return diag.Diagnostics{}
 		}
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Project %s could not be found", objectMeta.Name),
+				Detail:   err.Error(),
+			},
 	}
-	err = flattenProject(p, d)
-	return err
+	diags = flattenProject(p, d)
+	return diags
 }
 
-func resourceArgoCDProjectUpdate(d *schema.ResourceData, meta interface{}) error {
+func resourceArgoCDProjectUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	if ok := d.HasChanges("metadata", "spec"); ok {
 		objectMeta, spec, err := expandProject(d)
-		if err != nil {
-			return err
+		if diags != nil {
+			return diags
 		}
 		server := meta.(ServerInterface)
 		c := *server.ProjectClient
@@ -180,13 +198,19 @@ func resourceArgoCDProjectUpdate(d *schema.ResourceData, meta interface{}) error
 		tokenMutexProjectMap[projectName].Unlock()
 
 		if err != nil {
-			return err
+			return []diag.Diagnostic{
+				diag.Diagnostic{
+					Severity: diag.Error,
+					Summary:  fmt.Sprintf("Error while waiting for project %s to be created", projectName),
+					Detail:   err.Error(),
+				},
+			}
 		}
 	}
-	return resourceArgoCDProjectRead(d, meta)
+	return resourceArgoCDProjectRead(ctx, d, meta)
 }
 
-func resourceArgoCDProjectDelete(d *schema.ResourceData, meta interface{}) error {
+func resourceArgoCDProjectDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	server := meta.(ServerInterface)
 	c := *server.ProjectClient
 	projectName := d.Id()
@@ -199,8 +223,13 @@ func resourceArgoCDProjectDelete(d *schema.ResourceData, meta interface{}) error
 	tokenMutexProjectMap[projectName].Unlock()
 
 	if err != nil && !strings.Contains(err.Error(), "NotFound") {
-		return err
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Project %s not found", projectName),
+				Detail:   err.Error(),
+			},
 	}
 	d.SetId("")
-	return nil
+	return diags
 }

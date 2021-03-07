@@ -18,8 +18,8 @@ func resourceArgoCDApplication() *schema.Resource {
 	return &schema.Resource{
 		CreateContext: resourceArgoCDApplicationCreate,
 		ReadContext:   resourceArgoCDApplicationRead,
-		Update:        resourceArgoCDApplicationUpdate,
-		Delete:        resourceArgoCDApplicationDelete,
+		UpdateContext: resourceArgoCDApplicationUpdate,
+		DeleteContext: resourceArgoCDApplicationDelete,
 		// TODO: add importer acceptance tests
 		Importer: &schema.ResourceImporter{
 			StateContext: schema.ImportStatePassthroughContext,
@@ -121,7 +121,7 @@ func resourceArgoCDApplicationCreate(ctx context.Context, d *schema.ResourceData
 	}
 	d.SetId(app.Name)
 	if wait, ok := d.GetOk("wait"); ok && wait.(bool) {
-		err = resource.RetryContext(context.Background(), d.Timeout(schema.TimeoutCreate), func() *resource.RetryError {
+		return resource.RetryContext(context.Background(), d.Timeout(schema.TimeoutCreate), func() *resource.RetryError {
 			a, err := c.Get(context.Background(), &applicationClient.ApplicationQuery{
 				Name: &app.Name,
 			})
@@ -156,7 +156,7 @@ func resourceArgoCDApplicationRead(ctx context.Context, d *schema.ResourceData, 
 	server := meta.(ServerInterface)
 	c := *server.ApplicationClient
 	appName := d.Id()
-	app, err := c.Get(context.Background(), &applicationClient.ApplicationQuery{
+	app, err := c.Get(ctx, &applicationClient.ApplicationQuery{
 		Name: &appName,
 	})
 	if err != nil {
@@ -172,48 +172,64 @@ func resourceArgoCDApplicationRead(ctx context.Context, d *schema.ResourceData, 
 			},
 		}
 	}
-	diags = flattenApplication(app, d)
+	diags := flattenApplication(app, d)
 	return diags
 }
 
-func resourceArgoCDApplicationUpdate(d *schema.ResourceData, meta interface{}) error {
+func resourceArgoCDApplicationUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	appName := d.Id()
-
 	if ok := d.HasChanges("metadata", "spec"); ok {
-		objectMeta, spec, err := expandApplication(d)
-		if err != nil {
-			return err
+		objectMeta, spec, diags := expandApplication(d)
+		if diags != nil {
+			return diags
 		}
 		server := meta.(ServerInterface)
 		c := *server.ApplicationClient
-		appRequest := &applicationClient.ApplicationUpdateRequest{
+		appRequest := c.Get(ctx, &applicationClient.ApplicationUpdateRequest{
 			Application: &application.Application{
 				ObjectMeta: objectMeta,
 				Spec:       spec,
-			}}
+			}})
 
 		featureApplicationLevelSyncOptionsSupported, err := server.isFeatureSupported(featureApplicationLevelSyncOptions)
 		if err != nil {
-			return err
+			return []diag.Diagnostic{
+				diag.Diagnostic{
+					Severity: diag.Error,
+					Summary:  "Feature not supported",
+					Detail:   err.Error(),
+				},
+			}
 		}
 		if !featureApplicationLevelSyncOptionsSupported &&
 			spec.SyncPolicy != nil &&
 			spec.SyncPolicy.SyncOptions != nil {
-			return fmt.Errorf(
-				"application-level sync_options is only supported from ArgoCD %s onwards",
-				featureVersionConstraintsMap[featureApplicationLevelSyncOptions].String())
+			return []diag.Diagnostic{
+				diag.Diagnostic{
+					Severity: diag.Error,
+					Summary: fmt.Sprintf(
+						"application-level sync_options is only supported from ArgoCD %s onwards",
+						featureVersionConstraintsMap[featureApplicationLevelSyncOptions].String()),
+					Detail: err.Error(),
+				},
+			}
 		}
 
-		app, err := c.Get(context.Background(), &applicationClient.ApplicationQuery{
+		app, err := c.Get(ctx, &applicationClient.ApplicationQuery{
 			Name: &appName,
 		})
 		if app != nil {
 			// Kubernetes API requires providing the up-to-date correct ResourceVersion for updates
 			appRequest.Application.ResourceVersion = app.ResourceVersion
 		}
-		_, err = c.Update(context.Background(), appRequest)
+		_, err = c.Update(ctx, appRequest)
 		if err != nil {
-			return err
+			return []diag.Diagnostic{
+				diag.Diagnostic{
+					Severity: diag.Error,
+					Summary:  fmt.Sprintf("Application %s could not be updated", appName),
+					Detail:   err.Error(),
+				},
 		}
 		if wait, _ok := d.GetOk("wait"); _ok && wait.(bool) {
 			err = resource.RetryContext(context.Background(), d.Timeout(schema.TimeoutUpdate), func() *resource.RetryError {
@@ -232,25 +248,39 @@ func resourceArgoCDApplicationUpdate(d *schema.ResourceData, meta interface{}) e
 				return nil
 			})
 			if err != nil {
-				return fmt.Errorf("something went wrong upon waiting for the application to be updated: %s", err)
+				return []diag.Diagnostic{
+					diag.Diagnostic{
+						Severity: diag.Error,
+						Summary:  fmt.Sprintf("something went wrong upon waiting for the application to be updated: %s", err),
+						Detail:   err.Error(),
+					},
+				}
 			}
 		}
 	}
-	return resourceArgoCDApplicationRead(d, meta)
+	return resourceArgoCDApplicationRead(ctx, d, meta)
 }
 
-func resourceArgoCDApplicationDelete(d *schema.ResourceData, meta interface{}) error {
+func resourceArgoCDApplicationDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	server := meta.(ServerInterface)
 	c := *server.ApplicationClient
-	appName := d.Id()
-	_, err := c.Delete(context.Background(), &applicationClient.ApplicationDeleteRequest{Name: &appName})
+	appName = d.Id()
+	_, err := c.Delete(context.Background(), &applicationClient.ApplicationDeleteRequest{
+		Name: &appName,
+	})
 	if err != nil && !strings.Contains(err.Error(), "NotFound") {
-		return err
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Application %s not found", appName),
+				Detail:   err.Error(),
+			},
+		}
 	}
 	if wait, ok := d.GetOk("wait"); ok && wait.(bool) {
 		return resource.RetryContext(context.Background(), d.Timeout(schema.TimeoutDelete), func() *resource.RetryError {
-			_, err = c.Get(context.Background(), &applicationClient.ApplicationQuery{
-				Name: &appName,
+			_, err := c.Get(context.Background(), &applicationClient.ApplicationQuery{
+				Name: &app.Name,
 			})
 			if err == nil {
 				return resource.RetryableError(fmt.Errorf("application %s is still present", appName))
@@ -263,5 +293,5 @@ func resourceArgoCDApplicationDelete(d *schema.ResourceData, meta interface{}) e
 		})
 	}
 	d.SetId("")
-	return nil
+	return diags
 }
