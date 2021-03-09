@@ -52,15 +52,13 @@ func resourceArgoCDApplicationCreate(ctx context.Context, d *schema.ResourceData
 	app, err := c.Get(ctx, &applicationClient.ApplicationQuery{
 		Name: &objectMeta.Name,
 	})
-	if err != nil {
-		if strings.Contains(err.Error(), "NotFound") {
-			return []diag.Diagnostic{
-				diag.Diagnostic{
-					Severity: diag.Error,
-					Summary:  fmt.Sprintf("Application %s not found", objectMeta.Name),
-					Detail:   err.Error(),
-				},
-			}
+	if err != nil && !strings.Contains(err.Error(), "NotFound") {
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("application %s could not be created", objectMeta.Name),
+				Detail:   err.Error(),
+			},
 		}
 	}
 	if app != nil {
@@ -77,7 +75,7 @@ func resourceArgoCDApplicationCreate(ctx context.Context, d *schema.ResourceData
 		return []diag.Diagnostic{
 			diag.Diagnostic{
 				Severity: diag.Error,
-				Summary:  "Feature not supported",
+				Summary:  "feature not supported",
 				Detail:   err.Error(),
 			},
 		}
@@ -96,7 +94,7 @@ func resourceArgoCDApplicationCreate(ctx context.Context, d *schema.ResourceData
 		}
 	}
 
-	app, err = c.Create(context.Background(), &applicationClient.ApplicationCreateRequest{
+	app, err = c.Create(ctx, &applicationClient.ApplicationCreateRequest{
 		Application: application.Application{
 			ObjectMeta: objectMeta,
 			Spec:       spec,
@@ -106,7 +104,7 @@ func resourceArgoCDApplicationCreate(ctx context.Context, d *schema.ResourceData
 		return []diag.Diagnostic{
 			diag.Diagnostic{
 				Severity: diag.Error,
-				Summary:  fmt.Sprintf("Application %s could not be created", objectMeta.Name),
+				Summary:  fmt.Sprintf("application %s could not be created", objectMeta.Name),
 				Detail:   err.Error(),
 			},
 		}
@@ -115,20 +113,17 @@ func resourceArgoCDApplicationCreate(ctx context.Context, d *schema.ResourceData
 		return []diag.Diagnostic{
 			diag.Diagnostic{
 				Severity: diag.Error,
-				Summary:  fmt.Sprintf("Application %s could not be created: unknown reason", objectMeta.Name),
+				Summary:  fmt.Sprintf("application %s could not be created: unknown reason", objectMeta.Name),
 			},
 		}
 	}
 	d.SetId(app.Name)
 	if wait, ok := d.GetOk("wait"); ok && wait.(bool) {
-		return resource.RetryContext(context.Background(), d.Timeout(schema.TimeoutCreate), func() *resource.RetryError {
-			a, err := c.Get(context.Background(), &applicationClient.ApplicationQuery{
+		err = resource.RetryContext(ctx, d.Timeout(schema.TimeoutCreate), func() *resource.RetryError {
+			a, err := c.Get(ctx, &applicationClient.ApplicationQuery{
 				Name: &app.Name,
 			})
 			if err != nil {
-				if strings.Contains(err.Error(), "NotFound") {
-					return resource.RetryableError(err)
-				}
 				return resource.NonRetryableError(fmt.Errorf("error while waiting for application %s to be synced and healthy: %s", app.Name, err))
 			}
 			if a.Status.Health.Status != health.HealthStatusHealthy {
@@ -167,29 +162,37 @@ func resourceArgoCDApplicationRead(ctx context.Context, d *schema.ResourceData, 
 		return []diag.Diagnostic{
 			diag.Diagnostic{
 				Severity: diag.Error,
-				Summary:  fmt.Sprintf("Application %s not found", appName),
+				Summary:  fmt.Sprintf("application %s not found", appName),
 				Detail:   err.Error(),
 			},
 		}
 	}
-	diags := flattenApplication(app, d)
-	return diags
+	err = flattenApplication(app, d)
+	if err != nil {
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("application %s could not be flattened", appName),
+				Detail:   err.Error(),
+			},
+		}
+	}
+	return nil
 }
 
 func resourceArgoCDApplicationUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	appName := d.Id()
 	if ok := d.HasChanges("metadata", "spec"); ok {
-		objectMeta, spec, diags := expandApplication(d)
+		_, spec, diags := expandApplication(d)
 		if diags != nil {
 			return diags
 		}
 		server := meta.(ServerInterface)
 		c := *server.ApplicationClient
-		appRequest := c.Get(ctx, &applicationClient.ApplicationUpdateRequest{
-			Application: &application.Application{
-				ObjectMeta: objectMeta,
-				Spec:       spec,
-			}})
+		appRequest, err := c.Get(ctx, &applicationClient.ApplicationQuery{
+			Name:     &appName,
+			Projects: []string{spec.Project},
+		})
 
 		featureApplicationLevelSyncOptionsSupported, err := server.isFeatureSupported(featureApplicationLevelSyncOptions)
 		if err != nil {
@@ -220,20 +223,23 @@ func resourceArgoCDApplicationUpdate(ctx context.Context, d *schema.ResourceData
 		})
 		if app != nil {
 			// Kubernetes API requires providing the up-to-date correct ResourceVersion for updates
-			appRequest.Application.ResourceVersion = app.ResourceVersion
+			appRequest.ResourceVersion = app.ResourceVersion
 		}
-		_, err = c.Update(ctx, appRequest)
+		_, err = c.Update(ctx, &applicationClient.ApplicationUpdateRequest{
+			Application: appRequest,
+		})
 		if err != nil {
 			return []diag.Diagnostic{
 				diag.Diagnostic{
 					Severity: diag.Error,
-					Summary:  fmt.Sprintf("Application %s could not be updated", appName),
+					Summary:  fmt.Sprintf("application %s could not be updated", appName),
 					Detail:   err.Error(),
 				},
+			}
 		}
 		if wait, _ok := d.GetOk("wait"); _ok && wait.(bool) {
-			err = resource.RetryContext(context.Background(), d.Timeout(schema.TimeoutUpdate), func() *resource.RetryError {
-				a, err := c.Get(context.Background(), &applicationClient.ApplicationQuery{
+			err = resource.RetryContext(ctx, d.Timeout(schema.TimeoutUpdate), func() *resource.RetryError {
+				a, err := c.Get(ctx, &applicationClient.ApplicationQuery{
 					Name: &app.Name,
 				})
 				if err != nil {
@@ -264,23 +270,23 @@ func resourceArgoCDApplicationUpdate(ctx context.Context, d *schema.ResourceData
 func resourceArgoCDApplicationDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	server := meta.(ServerInterface)
 	c := *server.ApplicationClient
-	appName = d.Id()
-	_, err := c.Delete(context.Background(), &applicationClient.ApplicationDeleteRequest{
+	appName := d.Id()
+	_, err := c.Delete(ctx, &applicationClient.ApplicationDeleteRequest{
 		Name: &appName,
 	})
 	if err != nil && !strings.Contains(err.Error(), "NotFound") {
 		return []diag.Diagnostic{
 			diag.Diagnostic{
 				Severity: diag.Error,
-				Summary:  fmt.Sprintf("Application %s not found", appName),
+				Summary:  fmt.Sprintf("application %s could not be deleted", appName),
 				Detail:   err.Error(),
 			},
 		}
 	}
 	if wait, ok := d.GetOk("wait"); ok && wait.(bool) {
-		return resource.RetryContext(context.Background(), d.Timeout(schema.TimeoutDelete), func() *resource.RetryError {
-			_, err := c.Get(context.Background(), &applicationClient.ApplicationQuery{
-				Name: &app.Name,
+		err = resource.RetryContext(ctx, d.Timeout(schema.TimeoutDelete), func() *resource.RetryError {
+			_, err := c.Get(ctx, &applicationClient.ApplicationQuery{
+				Name: &appName,
 			})
 			if err == nil {
 				return resource.RetryableError(fmt.Errorf("application %s is still present", appName))
@@ -291,7 +297,16 @@ func resourceArgoCDApplicationDelete(ctx context.Context, d *schema.ResourceData
 			d.SetId("")
 			return nil
 		})
+		if err != nil {
+			return []diag.Diagnostic{
+				diag.Diagnostic{
+					Severity: diag.Error,
+					Summary:  fmt.Sprintf("application %s not be deleted", appName),
+					Detail:   err.Error(),
+				},
+			}
+		}
 	}
 	d.SetId("")
-	return diags
+	return nil
 }

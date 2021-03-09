@@ -45,8 +45,14 @@ func resourceArgoCDProject() *schema.Resource {
 
 func resourceArgoCDProjectCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	objectMeta, spec, err := expandProject(d)
-	if diags != nil {
-		return diags
+	if err != nil {
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("project %s could not be created", d.Id()),
+				Detail:   err.Error(),
+			},
+		}
 	}
 	server := meta.(ServerInterface)
 	c := *server.ProjectClient
@@ -69,6 +75,7 @@ func resourceArgoCDProjectCreate(ctx context.Context, d *schema.ResourceData, me
 					Summary:  fmt.Sprintf("Project %s could not be created", projectName),
 					Detail:   err.Error(),
 				},
+			}
 		}
 	}
 	if p != nil {
@@ -99,12 +106,13 @@ func resourceArgoCDProjectCreate(ctx context.Context, d *schema.ResourceData, me
 				Summary:  fmt.Sprintf("Project %s could not be created", objectMeta.Name),
 				Detail:   err.Error(),
 			},
+		}
 	}
 	if p == nil {
 		return []diag.Diagnostic{
 			diag.Diagnostic{
 				Severity: diag.Error,
-				Summary:  fmt.Errorf("something went wrong during project creation"),
+				Summary:  fmt.Sprintf("something went wrong during project creation with ID %s", d.Id()),
 				Detail:   err.Error(),
 			},
 		}
@@ -135,19 +143,35 @@ func resourceArgoCDProjectRead(ctx context.Context, d *schema.ResourceData, meta
 		return []diag.Diagnostic{
 			diag.Diagnostic{
 				Severity: diag.Error,
-				Summary:  fmt.Sprintf("Project %s could not be found", objectMeta.Name),
+				Summary:  fmt.Sprintf("project %s could not be found", projectName),
 				Detail:   err.Error(),
 			},
+		}
 	}
-	diags = flattenProject(p, d)
-	return diags
+	err = flattenProject(p, d)
+	if err != nil {
+		return []diag.Diagnostic{
+			diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("project %s could not be flattened", d.Id()),
+				Detail:   err.Error(),
+			},
+		}
+	}
+	return nil
 }
 
 func resourceArgoCDProjectUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	if ok := d.HasChanges("metadata", "spec"); ok {
 		objectMeta, spec, err := expandProject(d)
-		if diags != nil {
-			return diags
+		if err != nil {
+			return []diag.Diagnostic{
+				diag.Diagnostic{
+					Severity: diag.Error,
+					Summary:  fmt.Sprintf("project %s could not be updated", d.Id()),
+					Detail:   err.Error(),
+				},
+			}
 		}
 		server := meta.(ServerInterface)
 		c := *server.ProjectClient
@@ -175,19 +199,28 @@ func resourceArgoCDProjectUpdate(ctx context.Context, d *schema.ResourceData, me
 			// Preserve preexisting JWTs for managed roles
 			roles, err := expandProjectRoles(d.Get("spec.0.role").([]interface{}))
 			if err != nil {
-				return err
+				return []diag.Diagnostic{
+					diag.Diagnostic{
+						Severity: diag.Error,
+						Summary:  fmt.Sprintf("roles for project %s could not be expanded", d.Id()),
+						Detail:   err.Error(),
+					},
+				}
 			}
 			for _, r := range roles {
 				pr, i, err := p.GetRoleByName(r.Name)
 				if err != nil {
-					switch i {
-					default:
 					// i == -1 means the role does not exist
 					// and was recently added within Terraform tf files
-					case -1:
-						continue
+					if i != -1 {
+						return []diag.Diagnostic{
+							diag.Diagnostic{
+								Severity: diag.Error,
+								Summary:  fmt.Sprintf("project role %s could not be retrieved", r.Name),
+								Detail:   err.Error(),
+							},
+						}
 					}
-					return err
 				}
 				projectRequest.Project.Spec.Roles[i].JWTTokens = pr.JWTTokens
 			}
@@ -229,7 +262,8 @@ func resourceArgoCDProjectDelete(ctx context.Context, d *schema.ResourceData, me
 				Summary:  fmt.Sprintf("Project %s not found", projectName),
 				Detail:   err.Error(),
 			},
+		}
 	}
 	d.SetId("")
-	return diags
+	return nil
 }
