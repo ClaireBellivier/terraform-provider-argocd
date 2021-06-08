@@ -2,14 +2,15 @@ package argocd
 
 import (
 	"fmt"
-	"github.com/argoproj/argo-cd/pkg/apiclient"
-	application "github.com/argoproj/argo-cd/pkg/apis/application/v1alpha1"
-	"github.com/argoproj/argo-cd/util/io"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/argoproj/argo-cd/pkg/apiclient"
+	application "github.com/argoproj/argo-cd/pkg/apis/application/v1alpha1"
+	"github.com/argoproj/argo-cd/util/io"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
 func convertStringToInt64(s string) (i int64, err error) {

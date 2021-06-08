@@ -3,13 +3,14 @@ package argocd
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
+
 	applicationClient "github.com/argoproj/argo-cd/pkg/apiclient/application"
 	application "github.com/argoproj/argo-cd/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/gitops-engine/pkg/health"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
-	"strings"
-	"time"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
 func resourceArgoCDApplication() *schema.Resource {

@@ -3,9 +3,10 @@ package argocd
 import (
 	"context"
 	"fmt"
-	clusterClient "github.com/argoproj/argo-cd/pkg/apiclient/cluster"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"strings"
+
+	clusterClient "github.com/argoproj/argo-cd/pkg/apiclient/cluster"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
 func resourceArgoCDCluster() *schema.Resource {
